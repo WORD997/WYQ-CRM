@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>FA电气自动化销售CRM</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.23.9/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+tailwind.config={theme:{extend:{colors:{primary:'#3B82F6'}}}}
+</script>
+</head>
+<body class="bg-gray-100">
+<div id="root"></div>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;padding-bottom:60px}
+.app-container{max-width:480px;margin:0 auto;min-height:100vh;background:#f3f4f6;position:relative;overflow-x:hidden}
+.card-press:active{transform:scale(0.97);transition:transform .1s}
+.sheet-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4);z-index:40;animation:fadeIn .2s}
+.sheet-panel{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:#fff;border-radius:16px 16px 0 0;z-index:50;animation:slideUp .3s ease;max-height:90vh;overflow-y:auto}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes slideUp{from{transform:translateX(-50%) translateY(100%)}to{transform:translateX(-50%) translateY(0)}}
+.timeline-line{position:absolute;left:15px;top:28px;bottom:0;width:2px;background:#e5e7eb}
+.badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600}
+input,textarea,select{font-size:16px!important}
+.bottom-nav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:#fff;border-top:1px solid #e5e7eb;display:flex;justify-content:space-around;padding:8px 0 12px 0;z-index:30;box-shadow:0 -2px 10px rgba(0,0,0,0.05)}
+.nav-item{display:flex;flex-direction:column;align-items:center;font-size:10px;color:#9ca3af;gap:2px;cursor:pointer}
+.nav-item.active{color:#3b82f6;font-weight:bold}
+</style>
+
+<script type="text/babel" data-presets="react">
+const{useState,useEffect,useRef,useMemo}=React;
+
+/* ==================== 配置区 ==================== */
+const SUPABASE_URL='https://rkabzwaplaxuggzeluue.supabase.co';
+const SUPABASE_ANON_KEY='sb_publishable_Y0RcCAkzEdn1c51d-RSEIg_6-rBRyWK';
+const AMAP_KEY=''; 
+const isSupabaseConfigured=()=>SUPABASE_URL!=='YOUR_SUPABASE_URL'&&SUPABASE_ANON_KEY!=='YOUR_SUPABASE_ANON_KEY';
+let sb=null;
+if(isSupabaseConfigured()){sb=supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY)}
+
+/* ==================== 工具函数 ==================== */
+const genId=()=>Date.now().toString(36)+Math.random().toString(36).substr(2,9);
+const todayStr=()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')};
+const getWeekRange=(offset=0)=>{const n=new Date(),d=n.getDay()||7,m=new Date(n);m.setDate(n.getDate()-d+1+(offset*7));const s=new Date(m);s.setDate(m.getDate()+6);return{start:fmt(m),end:fmt(s)}};
+const fmt=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+const isActive=c=>c.status!=='已搁置'&&c.status!=='已流失'&&c.status!=='已成交';
+const getLastFollowUp=c=>c.followUps&&c.followUps.length?c.followUps.slice().sort((a,b)=>b.date.localeCompare(a.date))[0]:null;
+const getNextDate=c=>{const fu=getLastFollowUp(c);return fu?fu.nextDate:null};
+const isToday=dateStr=>dateStr===todayStr();
+const isOverdue=dateStr=>dateStr&&dateStr<todayStr();
+const isThisWeek=dateStr=>{if(!dateStr)return false;const w=getWeekRange(0);return dateStr>=w.start&&dateStr<=w.end};
+const isNextWeek=dateStr=>{if(!dateStr)return false;const w=getWeekRange(1);return dateStr>=w.start&&dateStr<=w.end};
+const haversine=(lat1,lon1,lat2,lon2)=>{const R=6371,dLat=(lat2-lat1)*Math.PI/180,dLon=(lon2-lon1)*Math.PI/180;const a=Math.sin(dLat/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a))};
+const roadDist=km=>(km*1.3).toFixed(1);
+const statusColors={'重点跟进':'bg-blue-100 text-blue-700','已搁置':'bg-yellow-100 text-yellow-700','已成交':'bg-green-100 text-green-700','已流失':'bg-red-100 text-red-700','未标记':'bg-gray-100 text-gray-500'};
+const levelColors={A:'bg-red-500 text-white',B:'bg-orange-400 text-white',C:'bg-yellow-300 text-gray-800'};
+const typeIcons={'电话':'📞','拜访':'🏢','微信':'💬','邮件':'📧','其他':'📌'};
+
+/* ==================== 本地存储 ==================== */
+const LOCAL_KEY='crm_customers_v6';
+const loadLocal=()=>{try{return JSON.parse(localStorage.getItem(LOCAL_KEY))||JSON.parse(localStorage.getItem('crm_customers_v5'))||JSON.parse(localStorage.getItem('crm_customers_v4'))||JSON.parse(localStorage.getItem('crm_customers_v3'))||JSON.parse(localStorage.getItem('crm_customers_v2'))||JSON.parse(localStorage.getItem('crm_customers'))||[]}catch(e){return[]}};
+const saveLocal=cs=>localStorage.setItem(LOCAL_KEY,JSON.stringify(cs));
+
+/* ==================== 云服务 ==================== */
+const Cloud={
+  async loadAll(){if(!sb)return loadLocal();try{const{data,error}=await sb.from('customers').select('id,data,updated_at');if(error)throw error;return data.map(r=>({...r.data,id:r.id}))}catch(e){console.error(e);return loadLocal()}},
+  async save(c){saveLocal([...loadLocal().filter(x=>x.id!==c.id),c]);if(!sb)return;try{await sb.from('customers').upsert({id:c.id,data:c,updated_at:new Date().toISOString()})}catch(e){console.error(e)}},
+  async remove(id){saveLocal(loadLocal().filter(x=>x.id!==id));if(!sb)return;try{await sb.from('customers').delete().eq('id',id)}catch(e){console.error(e)}},
+  async bulkSave(cs){cs.forEach(c=>{const all=loadLocal();saveLocal([...all.filter(x=>x.id!==c.id),c])});if(!sb)return;try{const rows=cs.map(c=>({id:c.id,data:c,updated_at:new Date().toISOString()}));await sb.from('customers').upsert(rows)}catch(e){console.error(e)}},
+  async importAll(cs){saveLocal(cs);if(!sb)return;try{await sb.from('customers').delete().neq('id','');if(cs.length){const rows=cs.map(c=>({id:c.id,data:c,updated_at:new Date().toISOString()}));await sb.from('customers').upsert(rows)}}catch(e){console.error(e)}},
+  subscribe(cb){if(!sb)return null;return sb.channel('cust_ch').on('postgres_changes',{event:'*',schema:'public',table:'customers'},payload=>cb(payload)).subscribe()},
+  unsubscribe(ch){if(sb&&ch)sb.removeChannel(ch)}
+};
+
+/* ==================== 地理编码 V3 ==================== */
+const geoCache={};
+function cleanAddress(addr){
+  if(!addr)return '';
+  let cleaned=addr.replace(/[东南西北]{1,2}\d+米/g,'').replace(/(旁|对面|附近|左侧|右侧|往前\d+米|往里\d+米)/g,'').replace(/\s+/g,' ').trim();
+  return cleaned||addr;
+}
+function parseManualCoords(str){
+  if(!str)return null;
+  const m=str.match(/([\d.]+)\s*[,，\s]\s*([\d.]+)/);
+  if(!m)return null;
+  let a=parseFloat(m[1]),b=parseFloat(m[2]);
+  if(a>73&&a<135&&b>18&&b<54)return {lon:a,lat:b};
+  if(b>73&&b<135&&a>18&&a<54)return {lon:b,lat:a};
+  return null;
+}
+async function geocode(address){
+  if(!address||!address.trim())return null;
+  const key=address.trim();
+  if(geoCache[key])return geoCache[key];
+  const manual=parseManualCoords(key);
+  if(manual){geoCache[key]=manual;return manual;}
+  const cleanedAddr=cleanAddress(key);
+  try{
+    if(AMAP_KEY&&AMAP_KEY.trim()){
+      try{
+        const r=await fetch(`https://restapi.amap.com/v3/geocode/geo?address=${encodeURIComponent(cleanedAddr)}&key=${AMAP_KEY}`);
+        const d=await r.json();
+        if(d.status==='1'&&d.geocodes&&d.geocodes.length>0){const[lon,lat]=d.geocodes[0].location.split(',');const c={lat:parseFloat(lat),lon:parseFloat(lon)};geoCache[key]=c;return c}
+      }catch(e){console.log('AMAP failed, fallback...')}
+    }
+    const queries=[cleanedAddr+', China',cleanedAddr,cleanedAddr.replace(/省|市|区|县/g,' ')+' China'];
+    for(const q of queries){
+      try{
+        const r=await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=1&countrycodes=cn&accept-language=zh`);
+        const d=await r.json();
+        if(d&&d[0]&&d[0].lat&&d[0].lon){const c={lat:parseFloat(d[0].lat),lon:parseFloat(d[0].lon)};geoCache[key]=c;return c}
+      }catch(e){continue;}
+      await new Promise(r=>setTimeout(r,200));
+    }
+    try{
+      const r=await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(cleanedAddr)}&limit=1&lang=zh`);
+      const d=await r.json();
+      if(d.features&&d.features[0]){const[lon,lat]=d.features[0].geometry.coordinates;const c={lat,lon};geoCache[key]=c;return c}
+    }catch(e){}
+  }catch(e){console.error('Geocode error:',e)}
+  return null;
+}
+
+/* ==================== FA 深度画像分析引擎 V2 ==================== */
+function analyzeFACompany(companyName,note=''){
+  const name=(companyName||'').trim();
+  const full=((name||'')+' '+(note||'')).toLowerCase();
+  const KW={mfg:['生产','制造','加工','研制','研发','自制','产线','车间','工厂'],trade:['销售','贸易','商贸','批发','零售','经销','代理','分销'],integ:['集成','成套','系统集成','解决方案','盘厂'],proj:['工程','安装','施工','建设','维保','维修','技术服务']};
+  const hit=arr=>arr.filter(k=>full.includes(k));
+  const mfgH=hit(KW.mfg),tradeH=hit(KW.trade),integH=hit(KW.integ),projH=hit(KW.proj);
+  const nameTradeM=/商贸|贸易|供应链/;const nameMfgM=/制造|机械|设备|科技|电子|电气|自动化|智能|精密|光电|实业|材料|制品/;
+  let natureType,nature,mfgEv;
+  if(mfgH.length>0){natureType='mfg';nature='制造商（OEM）';mfgEv=`<strong>是</strong>。信息中命中"${mfgH.slice(0,3).join('"、"')}"等制造类描述，判定具备自主生产制造能力。`}
+  else if(integH.length>0&&tradeH.length===0){natureType='integ';nature='系统集成商 / 盘厂';mfgEv=`<strong>否</strong>。核心是"${integH.slice(0,2).join('"、"')}"，为他人提供成套设备与解决方案。`}
+  else if(tradeH.length>0){natureType='trade';nature='贸易商（批发/零售）';mfgEv=`<strong>否</strong>。信息以"${tradeH.slice(0,3).join('"、"')}"为主，<strong>没有任何"生产"、"制造"、"加工"相关的描述</strong>。`}
+  else if(projH.length>0){natureType='proj';nature='工程 / 安装维保商';mfgEv=`<strong>否</strong>。核心是"${projH.slice(0,2).join('"、"')}"类服务。`}
+  else if(nameMfgM.test(name)&&!nameTradeM.test(name)){natureType='mfg';nature='制造商（依公司名称推断）';mfgEv=`<strong>大概率是</strong>。公司名称具备典型制造业特征。`}
+  else if(nameTradeM.test(name)){natureType='trade';nature='贸易商';mfgEv=`<strong>否</strong>。公司名称含贸易类特征。`}
+  else{natureType='unknown';nature='暂无法判定';mfgEv='信息不足，建议把企查查/天眼查上的"经营范围"粘贴到备忘后重新分析。'}
+  const industries=[
+    {short:'环保水处理',keywords:/水处理|环保|净水|污水|废水|纯水|反渗透|ro膜|edi|过滤/,coreProducts:'反渗透RO纯水系统、EDI超纯水装置、全自动软水器、多介质过滤器',approach:'以"变频器+PLC+仪表"打包方案切入。',faComponents:[{cat:'PLC与HMI',desc:'核心控制器'},{cat:'变频器',desc:'水泵风机驱动'},{cat:'传感器',desc:'压力流量液位监测'},{cat:'电动阀门',desc:'管路流体控制'},{cat:'低压电器',desc:'电控柜基础组件'}]},
+    {short:'包装/食品机械',keywords:/包装|灌装|封口|贴标|码垛|装箱|食品机械|饮料机械/,coreProducts:'自动包装机、灌装机、封箱机、贴标机、码垛机器人',approach:'从伺服与传感器选型替代切入。',faComponents:[{cat:'PLC与HMI',desc:'整机运动控制核心'},{cat:'伺服系统',desc:'高精度定位'},{cat:'变频器',desc:'输送带调速'},{cat:'传感器',desc:'光电接近编码器'},{cat:'低压电器',desc:'继电器电磁阀'}]},
+    {short:'数控机床',keywords:/机床|数控|cnc|加工中心|车床|铣床|磨床|切割|激光/,coreProducts:'数控机床、加工中心、激光切割机、折弯机',approach:'从伺服/主轴驱动与外围电气切入。',faComponents:[{cat:'CNC控制器',desc:'多轴插补运算'},{cat:'伺服驱动器',desc:'XYZ轴精密进给'},{cat:'变频器',desc:'主轴调速'},{cat:'传感器',desc:'光栅尺限位原点'},{cat:'低压电器',desc:'大功率断路器'}]},
+    {short:'纺织印染',keywords:/纺织|印染|织布|纺纱|化纤|无纺布/,coreProducts:'纺纱机、织布机、印染生产线、定型机',approach:'以变频器多电机联动、张力控制方案切入。',faComponents:[{cat:'PLC与HMI',desc:'多电机同步'},{cat:'变频器/伺服',desc:'联动调速'},{cat:'传感器',desc:'张力计米断纱'},{cat:'低压电器',desc:'固态继电热温控'}]},
+    {short:'锂电/新能源',keywords:/锂电|新能源|电池|光伏|储能|太阳能/,coreProducts:'锂电池涂布卷绕叠片设备、光伏组件产线',approach:'高端产线认准进口与一线品牌。',faComponents:[{cat:'高端PLC/PAC',desc:'高速总线多轴同步'},{cat:'高性能伺服',desc:'微米级精度'},{cat:'机器视觉',desc:'缺陷检测纠偏'},{cat:'传感器',desc:'厚度张力温度'},{cat:'低压电器',desc:'直流断路器BMS'}]},
+    {short:'暖通/制冷/楼宇',keywords:/暖通|空调|制冷|热泵|新风|楼宇|电梯|风机|风扇/,coreProducts:'中央空调系统、热泵机组、新风系统、风机设备',approach:'以变频器节能改造、控制柜成套切入。',faComponents:[{cat:'PLC/DDC',desc:'冷热水机组楼宇自控'},{cat:'变频器',desc:'压缩机水泵变频'},{cat:'传感器',desc:'温湿度压差水流'},{cat:'电动阀执行器',desc:'二通三通阀调节'},{cat:'低压电器',desc:'接触器热继软启'}]},
+    {short:'物流仓储',keywords:/物流|仓储|输送|分拣|agv|立体库|提升机/,coreProducts:'自动化立体仓库、输送分拣线、AGV',approach:'关注输送线传感器、变频器与低压电气。',faComponents:[{cat:'PLC/WCS',desc:'调度算法路径规划'},{cat:'伺服/步进',desc:'堆垛机分拣精密控制'},{cat:'变频器',desc:'输送带调速'},{cat:'传感器',desc:'条码RFID测距防撞'},{cat:'低压电器',desc:'电机保护安全回路'}]}
+  ];
+  const matchedInds=industries.filter(ind=>ind.keywords.test(full));
+  const primary=matchedInds[0]||null;
+  let coreBiz;
+  if(natureType==='mfg')coreBiz=primary?`${primary.coreProducts}，并销售自产产品。`:'自主产品生产，并销售自产产品。';
+  else if(natureType==='trade')coreBiz=`主要从事${matchedInds.length?matchedInds.map(i=>i.short).join('、'):'通用设备'}等的销售${projH.length?`，以及${projH.slice(0,2).join('/')}等服务`:''}。`;
+  else if(natureType==='integ')coreBiz=`为客户提供${primary?primary.short+'等':''}自动化成套设备与系统解决方案。`;
+  else if(natureType==='proj')coreBiz=`承接${primary?primary.short+'等':''}现场安装、施工与维保服务。`;
+  else coreBiz='暂不明确，建议补充经营范围后重新分析。';
+  let verdict,verdictIcon,reasons=[];
+  if(natureType==='mfg'){verdictIcon='⭐⭐⭐';verdict='高匹配度目标客户';reasons=[`它是制造商：具备自主生产能力，FA元器件是其产品的核心部件。`,`采购模式匹配：为生产自己的产品而<strong>成批量、持续地</strong>采购PLC、变频器、伺服作为核心部件。`]}
+  else if(natureType==='integ'){verdictIcon='⭐⭐';verdict='高价值项目型客户';reasons=[`它是集成商/盘厂：按项目成套采购FA元器件，单次订单量大。`,`需求随项目走：适合以"打包报价+技术支持+交期保障"切入。`]}
+  else if(natureType==='proj'){verdictIcon='⭐⭐';verdict='项目型客户（次级目标）';reasons=[`它是工程/安装商：需求集中在项目期，并伴随长期的维修备件需求。`,`机会点：安装项目的电气成套、老旧设备改造、维保备件。`]}
+  else if(natureType==='trade'){verdictIcon='❌';verdict='非核心目标客户（但有替代机会）';reasons=[`它是贸易商，不是制造商：公司的核心是"卖设备"和"做技术服务"，而非"造设备"。`,`采购模式不匹配：它的采购需求是<strong>成品设备用于转售</strong>，而不是像设备制造商那样成批量、持续地采购PLC、变频器、伺服。`];if(projH.length)reasons.push(`但它具备"${projH[0]}"能力：安装/维保业务会带来备件与改造机会。`)}
+  else{verdictIcon='❓';verdict='待判定';reasons=[`当前信息不足以判定匹配度，请先补充经营范围等信息。`]}
+  let r='';
+  r+=`<strong>🏭 一、核心业务分析</strong>\n是否制造商：${mfgEv}\n经营性质：${nature}\n`;
+  if(matchedInds.length)r+=`行业归属：${matchedInds.map(i=>i.short).join('、')}\n`;
+  r+=`核心业务：${coreBiz}\n\n`;
+  r+=`<strong>🎯 二、目标客户判定：${verdictIcon} ${verdict}</strong>\n`;
+  reasons.forEach(x=>r+=`• ${x}\n`);r+=`\n`;
+  if(natureType==='trade'){
+    r+=`<strong>⚙️ 三、替代机会分析</strong>\n`;
+    if(matchedInds.length)r+=`• <strong>经营产品</strong>：${matchedInds.map(i=>i.short).join('、')}——终端客户指定品牌或需要替换型号时就是您的报价机会\n`;
+    r+=`• <strong>售后维修备件</strong>：所售设备需要质保与维修，会持续产生变频器、传感器、继电器等备件需求\n`;
+    r+=`• <strong>成套与安装外包</strong>：其销售项目中的电气成套、安装调试部分，若您有盘厂资源可承接\n`;
+    r+=`• <strong>终端客户转介绍</strong>：贸易商手握大量终端工厂资源，可发展为渠道伙伴\n\n`;
+    r+=`<strong>💡 四、销售切入建议</strong>\n• 不要硬推器件销售，改问"你们主要供货给哪些终端工厂？哪些品牌走得快？"\n• 从其安装/维保业务切入，先做备件小单建立信任\n`;
+  }else if(natureType==='mfg'){
+    r+=`<strong>⚙️ 三、FA器件需求分析</strong>\n`;
+    if(primary){primary.faComponents.forEach(c=>{r+=`• <strong>${c.cat}</strong>：${c.desc}\n`})}
+    else{r+=`• <strong>PLC与HMI</strong>：产线核心控制\n• <strong>变频器/伺服</strong>：电机调速与精密运动\n• <strong>传感器</strong>：位置/温度/压力采集\n• <strong>低压电器</strong>：配电与电机保护\n`}
+    r+=`\n<strong>💡 四、销售切入建议</strong>\n• ${primary?primary.approach:'找其电气/设备/采购部门，了解现用品牌型号。'}\n• 制造商决策链：技术部定品牌、采购部谈价格，两个部门都要覆盖\n`;
+  }else if(natureType==='integ'){
+    r+=`<strong>⚙️ 三、FA器件需求分析</strong>\n`;
+    if(primary){primary.faComponents.forEach(c=>{r+=`• <strong>${c.cat}</strong>：${c.desc}\n`})}
+    else{r+=`• <strong>PLC/DCS</strong>：项目核心控制器\n• <strong>变频器/软启</strong>：驱动类负载标配\n• <strong>控制柜成套</strong>：盘厂资源可直接承接\n• <strong>低压配电</strong>：断路器接触器继电器用量大\n`}
+    r+=`\n<strong>💡 四、销售切入建议</strong>\n• 以"打包报价+交期保障+账期支持"切入\n`;
+  }else if(natureType==='proj'){
+    r+=`<strong>⚙️ 三、FA器件需求分析</strong>\n• <strong>维修备件</strong>：维保业务持续消耗变频器、接触器、传感器等\n• <strong>改造成套</strong>：老旧设备节能改造、控制柜更新\n• <strong>安装辅材</strong>：低压电器、线缆、桥架等配套\n\n`;
+    r+=`<strong>💡 四、销售切入建议</strong>\n• 从维保备件与改造项目切入，先建立信任\n`;
+  }else{
+    r+=`<strong>⚙️ 三、通用FA需求参考</strong>\n• PLC、触摸屏、变频器、伺服\n• 低压电器、传感器与仪表\n\n`;
+    r+=`<strong>💡 四、销售切入建议</strong>\n• 先补充信息（把经营范围粘贴到备忘），再制定针对性打法\n`;
+  }
+  return r;
+}
+
+/* ==================== SVG图标 ==================== */
+const Icon=({name,size=20,className=''})=>{
+  const icons={
+    back:<path d="M19 12H5M12 19l-7-7 7-7"/>,search:<><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></>,
+    plus:<><path d="M12 5v14M5 12h14"/></>,trash:<><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></>,
+    download:<><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></>,upload:<><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></>,
+    check:<path d="M20 6L9 17l-5-5"/>,x:<path d="M18 6L6 18M6 6l12 12"/>,
+    sparkles:<><path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z"/><path d="M19 14l.5 1.5L21 16l-1.5.5L19 18l-.5-1.5L17 16l1.5-.5L19 14z"/></>,
+    home:<><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><path d="M9 22V12h6v10"/></>,
+    users:<><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></>,
+    nearby:<><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></>,
+    checkSq:<><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 12l2 2 4-4"/></>,
+    userPlus:<><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></>,
+    phone:<path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0122 16.92z"/>,
+    edit:<><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></>,
+    sortAsc:<path d="M3 8l4-4 4 4M7 4v16M21 12h-6"/>,
+    sortDesc:<path d="M3 16l4 4 4-4M7 20V4M21 12h-6"/>,
+    alert:<><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></>
+  };
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>{icons[name]||null}</svg>;
+};
+
+const Badge=({text,color})=><span className={`badge ${color}`}>{text}</span>;
+const BottomSheet=({show,onClose,title,children})=>{if(!show)return null;return <><div className="sheet-overlay" onClick={onClose}/><div className="sheet-panel p-5 pb-8"><div className="flex items-center justify-between mb-4 sticky top-0 bg-white z-10 pt-2"><h3 className="text-lg font-bold text-gray-800">{title}</h3><button onClick={onClose} className="p-1 rounded-full hover:bg-gray-100"><Icon name="x" size={20} className="text-gray-500"/></button></div>{children}</div></>};
+const StatCard=({label,value,color,icon,onClick})=><div onClick={onClick} className={`bg-white rounded-xl p-3 shadow-sm border border-gray-100 ${onClick?'card-press cursor-pointer':''}`}><div className="flex items-center gap-2 mb-1"><span className="text-lg">{icon}</span><span className="text-xs text-gray-500">{label}</span></div><div className={`text-2xl font-bold ${color}`}>{value}</div></div>;
+
+/* ==================== 仪表盘 ==================== */
+const Dashboard=({customers,onGoList,onAddCustomer,onBackup,onImport})=>{
+  const todayList=customers.filter(c=>isActive(c)&&isToday(getNextDate(c)));
+  const overdueList=customers.filter(c=>{const nd=getNextDate(c);return nd&&isOverdue(nd)&&c.status!=='已成交'&&c.status!=='已流失'});
+  const weekList=customers.filter(c=>isActive(c)&&isThisWeek(getNextDate(c)));
+  const nextWeekList=customers.filter(c=>isActive(c)&&isNextWeek(getNextDate(c)));
+  const closedList=customers.filter(c=>c.status==='已成交');
+  return <div className="p-4 pb-20">
+    <div className="flex items-center justify-between mb-4"><h1 className="text-xl font-bold text-gray-800">⚡ FA 销售工作台</h1>
+      <div className="flex gap-2"><button onClick={onBackup} className="p-2 bg-white rounded-lg shadow-sm border card-press"><Icon name="download" size={18}/></button><button onClick={onImport} className="p-2 bg-white rounded-lg shadow-sm border card-press"><Icon name="upload" size={18}/></button></div>
+    </div>
+    <div className="grid grid-cols-2 gap-3 mb-4">
+      <StatCard label="今日待跟进" value={todayList.length} color="text-blue-600" icon="📅" onClick={()=>onGoList('today')}/>
+      <StatCard label="逾期未跟进" value={overdueList.length} color="text-red-500" icon="⚠️" onClick={()=>onGoList('overdue')}/>
+      <StatCard label="本周待跟进" value={weekList.length} color="text-green-600" icon="📆" onClick={()=>onGoList('week')}/>
+      <StatCard label="下周待跟进" value={nextWeekList.length} color="text-purple-600" icon="🗓️" onClick={()=>onGoList('nextweek')}/>
+      <StatCard label="已成交客户" value={closedList.length} color="text-emerald-600" icon="✅" onClick={()=>onGoList('closed')}/>
+    </div>
+    {(todayList.length>0||overdueList.length>0)&&<div className="bg-white rounded-xl p-4 shadow-sm border mb-4"><h3 className="text-sm font-bold text-gray-700 mb-3">待办事项</h3>
+      {overdueList.slice(0,2).map(c=><div key={c.id} onClick={()=>onGoList('overdue')} className="flex items-center gap-2 py-2 border-b border-gray-50 card-press cursor-pointer"><span className="text-red-500 text-xs font-bold">逾期</span><span className="text-sm text-gray-800 truncate">{c.company||c.name}</span></div>)}
+      {todayList.slice(0,2).map(c=><div key={c.id} onClick={()=>onGoList('today')} className="flex items-center gap-2 py-2 border-b border-gray-50 card-press cursor-pointer"><span className="text-blue-500 text-xs font-bold">今日</span><span className="text-sm text-gray-800 truncate">{c.company||c.name}</span></div>)}
+    </div>}
+  </div>;
+};
+
+/* ==================== 客户列表 ==================== */
+const CustomerList=({customers,onDetail,onAddCustomer,selectionMode,setSelectionMode,selectedIds,setSelectedIds,onBatchLevel,onBatchStatus,onBatchDelete,filterTag,setFilterTag})=>{
+  const[search,setSearch]=useState('');
+  const[sortMode,setSortMode]=useState('followUp_desc');
+  const quickFilters=[{label:'今日',tag:'today'},{label:'本周',tag:'week'},{label:'下周',tag:'nextweek'},{label:'已逾期',tag:'overdue'},{label:'重点',tag:'focus'}];
+  const toggleSort=()=>{const modes=['followUp_desc','followUp_asc','created_desc','created_asc'];const idx=modes.indexOf(sortMode);setSortMode(modes[(idx+1)%modes.length])};
+  const sortLabel={'followUp_desc':'跟进↓','followUp_asc':'跟进↑','created_desc':'创建↓','created_asc':'创建↑'};
+  const filtered=useMemo(()=>{
+    let list=[...customers];
+    if(search){const q=search.toLowerCase();list=list.filter(c=>(c.company||'').toLowerCase().includes(q)||(c.name||'').toLowerCase().includes(q)||(c.contacts||[]).some(ct=>(ct.name||'').toLowerCase().includes(q)))}
+    if(filterTag){switch(filterTag){case'today':list=list.filter(c=>isActive(c)&&isToday(getNextDate(c)));break;case'week':list=list.filter(c=>isActive(c)&&isThisWeek(getNextDate(c)));break;case'nextweek':list=list.filter(c=>isActive(c)&&isNextWeek(getNextDate(c)));break;case'overdue':list=list.filter(c=>{const nd=getNextDate(c);return nd&&isOverdue(nd)&&c.status!=='已成交'&&c.status!=='已流失'});break;case'focus':list=list.filter(c=>c.status==='重点跟进');break;case'closed':list=list.filter(c=>c.status==='已成交');break}}
+    list.sort((a,b)=>{
+      switch(sortMode){
+        case'followUp_desc':{const la=getLastFollowUp(a),lb=getLastFollowUp(b);const da=la?la.date:'',db=lb?lb.date:'';if(da!==db)return db.localeCompare(da);return(b.createdAt||'').localeCompare(a.createdAt||'')}
+        case'followUp_asc':{const la=getLastFollowUp(a),lb=getLastFollowUp(b);const da=la?la.date:'',db=lb?lb.date:'';if(da!==db)return da.localeCompare(db);return(a.createdAt||'').localeCompare(b.createdAt||'')}
+        case'created_desc':return(b.createdAt||'').localeCompare(a.createdAt||'');
+        case'created_asc':return(a.createdAt||'').localeCompare(b.createdAt||'');
+        default:return 0;
+      }
+    });
+    return list;
+  },[customers,search,filterTag,sortMode]);
+  const toggleSelect=id=>setSelectedIds(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id]);
+  return <div className="p-4 pb-20">
+    <div className="flex items-center gap-2 mb-3">
+      <div className="flex-1 relative"><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="搜索公司/联系人" className="w-full pl-9 pr-3 py-2 bg-white border rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-300 shadow-sm"/><Icon name="search" size={16} className="absolute left-3 top-2.5 text-gray-400"/></div>
+      <button onClick={toggleSort} className="flex items-center gap-1 px-3 py-2 bg-white border rounded-lg text-xs font-medium text-gray-600 card-press shadow-sm whitespace-nowrap"><Icon name={sortMode.includes('desc')?'sortDesc':'sortAsc'} size={14}/>{sortLabel[sortMode]}</button>
+      <button onClick={()=>{setSelectionMode(!selectionMode);setSelectedIds([])}} className={`p-2 rounded-lg card-press shadow-sm border ${selectionMode?'bg-blue-500 text-white border-blue-500':'bg-white border-gray-200'}`}><Icon name="checkSq" size={20}/></button>
+    </div>
+    <div className="flex gap-2 overflow-x-auto pb-2 mb-3" style={{scrollbarWidth:'none'}}>{quickFilters.map(f=><button key={f.tag} onClick={()=>setFilterTag(filterTag===f.tag?null:f.tag)} className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-medium card-press ${filterTag===f.tag?'bg-blue-500 text-white shadow-sm':'bg-white border border-gray-200 text-gray-600'}`}>{f.label}</button>)}</div>
+    {filtered.length===0&&<div className="text-center text-gray-400 py-12"><p className="text-4xl mb-2">📭</p><p>暂无客户数据</p></div>}
+    {filtered.map(c=>{const lastFu=getLastFollowUp(c);const nd=getNextDate(c);return <div key={c.id} className={`bg-white rounded-xl p-3 mb-2 shadow-sm border card-press cursor-pointer ${selectionMode&&selectedIds.includes(c.id)?'border-blue-400 ring-1 ring-blue-200':'border-gray-100'}`} onClick={()=>selectionMode?toggleSelect(c.id):onDetail(c.id)}>
+      <div className="flex items-start gap-2">
+        {selectionMode&&<div className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 ${selectedIds.includes(c.id)?'bg-blue-500 border-blue-500':'border-gray-300'}`}>{selectedIds.includes(c.id)&&<Icon name="check" size={12} className="text-white"/>}</div>}
+        <div className="flex-1 min-w-0 space-y-1">
+          <div className="flex items-center gap-2"><span className="font-bold text-gray-800 text-sm truncate">{c.company||c.name||'未命名'}</span>{c.level&&<Badge text={c.level+'级'} color={levelColors[c.level]}/>}<Badge text={c.status||'未标记'} color={statusColors[c.status]||statusColors['未标记']}/></div>
+          <div className="text-xs text-gray-500 truncate flex items-center gap-1"><span className="shrink-0">📍</span><span className="truncate">{c.address||'暂无地址'}</span></div>
+          {lastFu?<div className="text-xs text-gray-500 flex items-center gap-1.5"><span className="shrink-0 text-gray-400">{lastFu.date}</span><span className="shrink-0">{typeIcons[lastFu.type]||'📌'}</span><span className="truncate text-gray-600">{lastFu.content}</span>{nd&&<span className={`shrink-0 ml-auto text-[10px] font-medium ${isOverdue(nd)?'text-red-500':'text-blue-500'}`}>→{nd}</span>}</div>:<div className="text-xs text-gray-300 italic">暂无跟进记录</div>}
+        </div>
+      </div>
+    </div>})}
+    {selectionMode&&selectedIds.length>0&&<div className="fixed bottom-16 left-1/2 -translate-x-1/2 w-[calc(100%-32px)] max-w-[448px] bg-white border p-3 z-30 shadow-lg rounded-xl"><div className="flex gap-2">
+      <select onChange={e=>{if(e.target.value){onBatchLevel(selectedIds,e.target.value);e.target.value=''}}} className="flex-1 border rounded-lg py-2 px-2 text-sm" defaultValue=""><option value="" disabled>设等级</option><option value="A">A级</option><option value="B">B级</option><option value="C">C级</option></select>
+      <select onChange={e=>{if(e.target.value){onBatchStatus(selectedIds,e.target.value);e.target.value=''}}} className="flex-1 border rounded-lg py-2 px-2 text-sm" defaultValue=""><option value="" disabled>设状态</option><option>重点跟进</option><option>已搁置</option><option>已成交</option><option>已流失</option></select>
+      <button onClick={()=>onBatchDelete(selectedIds)} className="bg-red-500 text-white px-3 py-2 rounded-lg text-sm card-press">删除</button>
+    </div></div>}
+  </div>;
+};
+
+/* ==================== 🌟 添加客户弹窗 (带查重功能) ==================== */
+const AddCustomerModal=({show,onClose,onSave,allCustomers})=>{
+  const[form,setForm]=useState({company:'',name:'',phone:'',address:'',note:''});
+  const[err,setErr]=useState('');
+  const[duplicateInfo,setDuplicateInfo]=useState(null); // 🌟 存储重复客户信息
+  
+  useEffect(()=>{
+    if(show){
+      setForm({company:'',name:'',phone:'',address:'',note:''});
+      setErr('');
+      setDuplicateInfo(null);
+    }
+  },[show]);
+
+  // 🌟 实时查重逻辑
+  useEffect(()=>{
+    if(!show || !form.company.trim()){
+      setDuplicateInfo(null);
+      return;
+    }
+    const inputName = form.company.trim().toLowerCase();
+    // 精确匹配 + 模糊匹配（包含关系）
+    const found = allCustomers.find(c => {
+      const existName = (c.company || '').trim().toLowerCase();
+      return existName === inputName || existName.includes(inputName) || inputName.includes(existName);
+    });
+    
+    if(found){
+      setDuplicateInfo({
+        id: found.id,
+        company: found.company || found.name,
+        status: found.status || '未标记',
+        level: found.level,
+        createdAt: found.createdAt
+      });
+    }else{
+      setDuplicateInfo(null);
+    }
+  },[form.company, show, allCustomers]);
+
+  const handleSave=()=>{
+    if(!form.company.trim()){
+      setErr('公司名称不能为空');
+      return;
+    }
+    
+    // 🌟 如果有重复，弹出确认
+    if(duplicateInfo){
+      const confirmMsg = `⚠️ 检测到相似客户已存在：\n\n「${duplicateInfo.company}」\n状态：${duplicateInfo.status}\n创建时间：${duplicateInfo.createdAt}\n\n确定要重复创建吗？\n（建议直接去客户库搜索该名称进行跟进）`;
+      if(!confirm(confirmMsg)){
+        return; // 用户取消，不保存
+      }
+    }
+    
+    const nid=genId();
+    onSave({
+      id:nid,
+      company:form.company.trim(),
+      name:form.name.trim(),
+      phone:form.phone.trim(),
+      address:form.address.trim(),
+      note:form.note.trim(),
+      faReport:'',
+      status:null,
+      level:null,
+      source:'手动添加',
+      tags:[],
+      followUps:[],
+      contacts:[],
+      createdAt:todayStr()
+    });
+    onClose();
+  };
+
+  return <BottomSheet show={show} onClose={()=>onClose()} title="添加客户">
+    <div className="space-y-3">
+      {err&&<div className="bg-red-50 text-red-600 text-sm p-2 rounded-lg flex items-center gap-2"><Icon name="alert" size={16}/>{err}</div>}
+      
+      {/* 🌟 公司名称输入 + 实时查重提示 */}
+      <div>
+        <label className="text-sm text-gray-600 mb-1 block">公司名称 *</label>
+        <input 
+          value={form.company} 
+          onChange={e=>setForm(f=>({...f,company:e.target.value}))} 
+          className={`w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 ${duplicateInfo ? 'border-red-300 focus:ring-red-200 bg-red-50' : 'focus:ring-blue-200'}`}
+          placeholder="输入公司名称，系统自动查重"
+        />
+        {duplicateInfo && (
+          <div className="mt-2 bg-red-50 border border-red-200 rounded-lg p-2.5 text-xs text-red-700 flex items-start gap-2">
+            <Icon name="alert" size={14} className="shrink-0 mt-0.5"/>
+            <div>
+              <div className="font-bold mb-1">⚠️ 该客户可能已存在</div>
+              <div className="space-y-0.5 text-red-600">
+                <div>• 名称：{duplicateInfo.company}</div>
+                <div>• 状态：{duplicateInfo.status} {duplicateInfo.level ? `(${duplicateInfo.level}级)` : ''}</div>
+                <div>• 创建于：{duplicateInfo.createdAt}</div>
+              </div>
+              <div className="mt-1.5 text-red-500 italic">建议：直接在客户库搜索此名称进行跟进，避免数据重复。</div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div><label className="text-sm text-gray-600 mb-1 block">首要联系人</label><input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200"/></div>
+      <div><label className="text-sm text-gray-600 mb-1 block">电话</label><input value={form.phone} onChange={e=>setForm(f=>({...f,phone:e.target.value}))} type="tel" className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200"/></div>
+      <div><label className="text-sm text-gray-600 mb-1 block">详细地址</label><input value={form.address} onChange={e=>setForm(f=>({...f,address:e.target.value}))} className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200" placeholder="如：成都市郫都区滨清路与新青路交叉口"/></div>
+      
+      <div className="flex gap-3 pt-1">
+        <button onClick={()=>onClose()} className="flex-1 border py-2.5 rounded-lg text-sm font-medium">取消</button>
+        <button 
+          onClick={handleSave} 
+          className={`flex-1 py-2.5 rounded-lg text-sm font-bold card-press ${duplicateInfo ? 'bg-orange-500 text-white' : 'bg-blue-500 text-white'}`}
+        >
+          {duplicateInfo ? '⚠️ 强制创建' : '保存'}
+        </button>
+      </div>
+    </div>
+  </BottomSheet>;
+};
+
+/* ==================== 其他弹窗组件 ==================== */
+const EditBasicInfoModal=({show,onClose,customer,onSave})=>{
+  const[form,setForm]=useState({company:'',address:'',source:''});
+  useEffect(()=>{if(show&&customer)setForm({company:customer.company||'',address:customer.address||'',source:customer.source||''})},[show,customer]);
+  const handleSave=()=>{if(!form.company.trim()){alert('公司名称不能为空');return}onSave({...customer,company:form.company.trim(),address:form.address.trim(),source:form.source.trim()});onClose()};
+  return <BottomSheet show={show} onClose={onClose} title="编辑基本信息"><div className="space-y-3">
+    <div><label className="text-sm text-gray-600 mb-1 block">公司名称 *</label><input value={form.company} onChange={e=>setForm(f=>({...f,company:e.target.value}))} className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200"/></div>
+    <div><label className="text-sm text-gray-600 mb-1 block">详细地址</label><input value={form.address} onChange={e=>setForm(f=>({...f,address:e.target.value}))} className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200" placeholder="如：江苏省苏州市吴中区XX路XX号"/></div>
+    <div><label className="text-sm text-gray-600 mb-1 block">来源</label><input value={form.source} onChange={e=>setForm(f=>({...f,source:e.target.value}))} className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200" placeholder="如：展会、转介绍、官网"/></div>
+    <div className="flex gap-3 pt-1"><button onClick={onClose} className="flex-1 border py-2.5 rounded-lg text-sm font-medium">取消</button><button onClick={handleSave} className="flex-1 bg-blue-500 text-white py-2.5 rounded-lg text-sm font-bold card-press">保存</button></div>
+  </div></BottomSheet>;
+};
+
+const EditContactModal=({show,onClose,contact,onSave})=>{
+  const[form,setForm]=useState({name:'',phone:'',role:'',note:''});
+  useEffect(()=>{if(show&&contact)setForm({name:contact.name||'',phone:contact.phone||'',role:contact.role||'',note:contact.note||''})},[show,contact]);
+  const handleSave=()=>{if(!form.name.trim()){alert('联系人姓名不能为空');return}onSave({...contact,name:form.name.trim(),phone:form.phone.trim(),role:form.role.trim(),note:form.note.trim()});onClose()};
+  return <BottomSheet show={show} onClose={onClose} title="编辑联系人"><div className="space-y-3">
+    <div><label className="text-sm text-gray-600 mb-1 block">姓名 *</label><input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200"/></div>
+    <div><label className="text-sm text-gray-600 mb-1 block">电话</label><input value={form.phone} onChange={e=>setForm(f=>({...f,phone:e.target.value}))} type="tel" className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200"/></div>
+    <div><label className="text-sm text-gray-600 mb-1 block">职位/角色</label><input value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value}))} className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200" placeholder="如：采购经理、技术总监"/></div>
+    <div><label className="text-sm text-gray-600 mb-1 block">备注</label><input value={form.note} onChange={e=>setForm(f=>({...f,note:e.target.value}))} className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200" placeholder="如：决策人、周末别打电话"/></div>
+    <div className="flex gap-3 pt-1"><button onClick={onClose} className="flex-1 border py-2.5 rounded-lg text-sm font-medium">取消</button><button onClick={handleSave} className="flex-1 bg-blue-500 text-white py-2.5 rounded-lg text-sm font-bold card-press">保存</button></div>
+  </div></BottomSheet>;
+};
+
+const AddContactModal=({show,onClose,onSave})=>{
+  const[form,setForm]=useState({name:'',phone:'',role:'',note:''});
+  const[err,setErr]=useState('');
+  useEffect(()=>{if(show){setForm({name:'',phone:'',role:'',note:''});setErr('')}},[show]);
+  const handleSave=()=>{if(!form.name.trim()){setErr('联系人姓名不能为空');return}onSave({id:genId(),name:form.name.trim(),phone:form.phone.trim(),role:form.role.trim(),note:form.note.trim()});onClose()};
+  return <BottomSheet show={show} onClose={onClose} title="添加联系人"><div className="space-y-3">
+    {err&&<div className="bg-red-50 text-red-600 text-sm p-2 rounded-lg">{err}</div>}
+    <div><label className="text-sm text-gray-600 mb-1 block">姓名 *</label><input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200" placeholder="必填"/></div>
+    <div><label className="text-sm text-gray-600 mb-1 block">电话</label><input value={form.phone} onChange={e=>setForm(f=>({...f,phone:e.target.value}))} type="tel" className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200" placeholder="选填"/></div>
+    <div><label className="text-sm text-gray-600 mb-1 block">职位/角色</label><input value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value}))} className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200" placeholder="如：采购经理、技术总监"/></div>
+    <div><label className="text-sm text-gray-600 mb-1 block">备注</label><input value={form.note} onChange={e=>setForm(f=>({...f,note:e.target.value}))} className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200" placeholder="如：决策人、周末别打电话"/></div>
+    <div className="flex gap-3 pt-1"><button onClick={onClose} className="flex-1 border py-2.5 rounded-lg text-sm font-medium">取消</button><button onClick={handleSave} className="flex-1 bg-blue-500 text-white py-2.5 rounded-lg text-sm font-bold card-press">保存</button></div>
+  </div></BottomSheet>;
+};
+
+const AddFollowUpModal=({show,onClose,onSave,customerId,title})=>{
+  const[form,setForm]=useState({content:'',date:todayStr(),nextDate:'',type:'拜访'});
+  const[err,setErr]=useState('');
+  useEffect(()=>{if(show){setForm({content:'',date:todayStr(),nextDate:'',type:'拜访'});setErr('')}},[show]);
+  const types=['拜访','电话','微信','邮件','其他'];
+  const handleSave=()=>{if(!form.content.trim()){setErr('请填写跟进情况');return}onSave(customerId,{id:genId(),date:form.date,type:form.type,content:form.content.trim(),nextDate:form.nextDate||null});onClose()};
+  return <BottomSheet show={show} onClose={onClose} title={title}><div className="space-y-3">
+    {err&&<div className="bg-red-50 text-red-600 text-sm p-2 rounded-lg">{err}</div>}
+    <div><label className="text-sm text-gray-600 mb-1 block">本次情况 *</label><textarea value={form.content} onChange={e=>setForm(f=>({...f,content:e.target.value}))} rows={3} className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200 resize-none"/></div>
+    <div className="grid grid-cols-2 gap-3"><div><label className="text-sm text-gray-600 mb-1 block">日期</label><input type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))} className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200"/></div><div><label className="text-sm text-gray-600 mb-1 block">下次跟进</label><input type="date" value={form.nextDate} onChange={e=>setForm(f=>({...f,nextDate:e.target.value}))} className="w-full border rounded-lg p-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-200"/></div></div>
+    <div><label className="text-sm text-gray-600 mb-1 block">类型</label><div className="flex gap-2 flex-wrap">{types.map(t=><button key={t} onClick={()=>setForm(f=>({...f,type:t}))} className={`px-3 py-1.5 rounded-full text-xs font-medium card-press ${form.type===t?'bg-blue-500 text-white':'bg-gray-100 text-gray-600'}`}>{typeIcons[t]} {t}</button>)}</div></div>
+    <div className="flex gap-3 pt-1"><button onClick={onClose} className="flex-1 border py-2.5 rounded-lg text-sm font-medium">跳过</button><button onClick={handleSave} className="flex-1 bg-blue-500 text-white py-2.5 rounded-lg text-sm font-bold card-press">保存</button></div>
+  </div></BottomSheet>;
+};
+
+/* ==================== 客户详情 ==================== */
+const CustomerDetail=({customer,allCustomers,onBack,onDelete,onAddFollowUp,onUpdate})=>{
+  const[tab,setTab]=useState('info');
+  const[analyzing,setAnalyzing]=useState(false);
+  const[noteText,setNoteText]=useState(customer.note||'');
+  const[faReport,setFaReport]=useState(customer.faReport||'');
+  const[nearbyLoading,setNearbyLoading]=useState(false);
+  const[nearbyList,setNearbyList]=useState([]);
+  const[showNearby,setShowNearby]=useState(false);
+  const[geoError,setGeoError]=useState('');
+  const[manualCoords,setManualCoords]=useState('');
+  const[contacts,setContacts]=useState(()=>{
+    if(customer.contacts&&customer.contacts.length>0)return customer.contacts;
+    if(customer.name||customer.phone)return [{id:genId(),name:customer.name||'',phone:customer.phone||'',role:'',note:''}];
+    return [];
+  });
+  const[showAddContact,setShowAddContact]=useState(false);
+  const[showEditBasic,setShowEditBasic]=useState(false);
+  const[editingContact,setEditingContact]=useState(null);
+
+  useEffect(()=>{
+    setNoteText(customer.note||'');
+    setFaReport(customer.faReport||'');
+    setShowNearby(false);setNearbyList([]);setGeoError('');setManualCoords('');
+    if(customer.contacts&&customer.contacts.length>0)setContacts(customer.contacts);
+    else if(customer.name||customer.phone)setContacts([{id:genId(),name:customer.name||'',phone:customer.phone||'',role:'',note:''}]);
+    else setContacts([]);
+  },[customer.id]);
+
+  const handleAiAnalyze=()=>{
+    setAnalyzing(true);
+    setTimeout(()=>{
+      const report=analyzeFACompany(customer.company||customer.name,noteText);
+      setFaReport(report);
+      onUpdate({...customer,faReport:report});
+      setAnalyzing(false);
+    },400);
+  };
+
+  const saveNote=()=>{if(noteText!==customer.note){onUpdate({...customer,note:noteText})}};
+  const saveContacts=(newContacts)=>{setContacts(newContacts);onUpdate({...customer,contacts:newContacts})};
+  const addContact=(ct)=>saveContacts([...contacts,ct]);
+  const updateContact=(updated)=>saveContacts(contacts.map(c=>c.id===updated.id?updated:c));
+  const removeContact=(id)=>{if(confirm('确定删除该联系人？'))saveContacts(contacts.filter(c=>c.id!==id))};
+
+  const findMyNearbyCustomers=async()=>{
+    setNearbyLoading(true);setShowNearby(true);setNearbyList([]);setGeoError('');
+    let myCoords=null;
+    if(manualCoords.trim()){
+      myCoords=parseManualCoords(manualCoords);
+      if(!myCoords){setNearbyLoading(false);setGeoError('❌ 手动输入的经纬度格式不正确。请使用格式：经度,纬度（如：104.0668,30.5728）');return}
+    }else{
+      if(!customer.address){setNearbyLoading(false);setGeoError('❌ 当前客户没有填写地址。请在"编辑基本信息"中添加地址，或在下方手动输入经纬度。');return}
+      myCoords=await geocode(customer.address);
+      if(!myCoords){setNearbyLoading(false);setGeoError(`❌ 自动解析失败「${customer.address}」。\n\n💡 解决方法：\n1. 打开高德地图/百度地图 App\n2. 长按该客户位置，复制经纬度\n3. 粘贴到下方"手动输入经纬度"框中\n4. 再次点击扫描`);return}
+    }
+    const results=[];let failCount=0;
+    for(const c of allCustomers){
+      if(c.id===customer.id)continue;
+      let cc=null;
+      if(c.address){cc=await geocode(c.address);if(!cc)failCount++}
+      if(cc){const dist=haversine(myCoords.lat,myCoords.lon,cc.lat,cc.lon);if(dist<=5)results.push({...c,distance:parseFloat(roadDist(dist))})}
+      await new Promise(r=>setTimeout(r,150));
+    }
+    results.sort((a,b)=>a.distance-b.distance);
+    setNearbyList(results);setNearbyLoading(false);
+    if(failCount>0&&results.length===0){setGeoError(`⚠️ 扫描完成，但${failCount}个客户的地址无法解析。建议为重要客户手动输入经纬度以提高准确率。`)}
+  };
+
+  const tabs=[{key:'info',label:'基本信息'},{key:'followUps',label:'跟进记录'},{key:'contacts',label:`联系人(${contacts.length})`}];
+  const sortedFu=(customer.followUps||[]).slice().sort((a,b)=>b.date.localeCompare(a.date));
+
+  return <div className="p-4 pb-24">
+    <div className="flex items-center gap-2 mb-4">
+      <button onClick={onBack} className="p-2 rounded-lg bg-white shadow-sm border card-press"><Icon name="back" size={20}/></button>
+      <h2 className="flex-1 font-bold text-lg truncate">{customer.company||customer.name||'客户详情'}</h2>
+      <button onClick={()=>{if(confirm('确定删除？'))onDelete(customer.id)}} className="p-2 text-red-400 bg-white shadow-sm border rounded-lg card-press"><Icon name="trash" size={20}/></button>
+    </div>
+    <div className="flex gap-1 bg-white rounded-lg p-1 mb-4 shadow-sm border">{tabs.map(t=><button key={t.key} onClick={()=>setTab(t.key)} className={`flex-1 py-2 rounded-md text-sm font-medium transition ${tab===t.key?'bg-blue-50 text-blue-600 shadow-sm':'text-gray-500'}`}>{t.label}</button>)}</div>
+
+    {tab==='info'&&<div className="space-y-4">
+      <div className="bg-white rounded-xl p-4 shadow-sm border">
+        <div className="flex justify-between items-center mb-3">
+          <h4 className="text-sm font-bold text-gray-600">基本信息</h4>
+          <button onClick={()=>setShowEditBasic(true)} className="p-1.5 text-blue-500 hover:bg-blue-50 rounded-lg card-press"><Icon name="edit" size={16}/></button>
+        </div>
+        <div className="space-y-2 text-sm">
+          <div className="flex"><span className="text-gray-400 w-16 shrink-0">公司</span><span className="text-gray-800">{customer.company||'-'}</span></div>
+          <div className="flex"><span className="text-gray-400 w-16 shrink-0">地址</span><span className="text-gray-800">{customer.address||'-'}</span></div>
+          <div className="flex"><span className="text-gray-400 w-16 shrink-0">来源</span><span className="text-gray-800">{customer.source||'-'}</span></div>
+          <div className="flex"><span className="text-gray-400 w-16 shrink-0">创建时间</span><span className="text-gray-800">{customer.createdAt||'-'}</span></div>
+        </div>
+      </div>
+      <div className="bg-white rounded-xl p-4 shadow-sm border">
+        <h4 className="text-sm font-bold text-gray-600 mb-2">状态与等级</h4>
+        <div className="flex gap-2 mb-3">{['A','B','C'].map(l=><button key={l} onClick={()=>onUpdate({...customer,level:customer.level===l?null:l})} className={`w-10 h-10 rounded-lg font-bold text-sm card-press ${customer.level===l?levelColors[l]:'bg-gray-100 text-gray-500'}`}>{l}</button>)}</div>
+        <div className="flex flex-wrap gap-2">{['重点跟进','已搁置','已成交','已流失'].map(s=><button key={s} onClick={()=>onUpdate({...customer,status:customer.status===s?null:s})} className={`px-3 py-1.5 rounded-full text-xs font-medium card-press ${customer.status===s?statusColors[s]+' ring-2 ring-offset-1 ring-blue-200':'bg-gray-100 text-gray-500'}`}>{s}</button>)}</div>
+      </div>
+      <div className="bg-white rounded-xl p-4 shadow-sm border">
+        <h4 className="text-sm font-bold text-gray-600 mb-2">备忘</h4>
+        <textarea value={noteText} onChange={e=>setNoteText(e.target.value)} onBlur={saveNote} rows={4} placeholder="记录客户相关信息，可粘贴经营范围..." className="w-full border rounded-lg p-2 text-sm outline-none focus:ring-2 focus:ring-blue-200 resize-none bg-gray-50"/>
+        <p className="text-[10px] text-gray-400 mt-1">失焦自动保存</p>
+      </div>
+      <div className="bg-white rounded-xl p-4 shadow-sm border">
+        <div className="flex justify-between items-center mb-2">
+          <h4 className="text-sm font-bold text-gray-600">FA 客户画像分析</h4>
+          <button onClick={handleAiAnalyze} disabled={analyzing} className="bg-purple-50 text-purple-600 border border-purple-200 px-3 py-1.5 rounded-lg text-xs font-bold card-press flex items-center gap-1">
+            {analyzing?'分析中...':<><Icon name="sparkles" size={12}/> {faReport?'更新画像':'生成画像'}</>}
+          </button>
+        </div>
+        {faReport?
+          <div className="bg-gradient-to-r from-slate-50 to-blue-50 border border-blue-100 rounded-lg p-3 text-sm leading-relaxed text-gray-700" dangerouslySetInnerHTML={{__html:faReport.replace(/\n/g,'<br/>')}}/>
+          :<div className="text-center text-gray-400 py-4 text-sm">点击上方按钮生成 FA 客户画像分析</div>
+        }
+        <p className="text-[10px] text-gray-400 mt-2">💡 技巧：把企查查/天眼查上的"经营范围"粘贴到备忘，分析将有理有据。</p>
+      </div>
+      <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl p-4 shadow-sm border border-blue-100">
+        <h4 className="text-sm font-bold text-blue-800 flex items-center gap-1 mb-1"><Icon name="nearby" size={16}/> 顺路拜访雷达</h4>
+        <p className="text-xs text-blue-600 mb-3">看看您库里还有哪些客户在这附近 5 公里内</p>
+        <div className="mb-3">
+          <label className="text-xs text-blue-700 font-medium mb-1 block">📍 手动输入经纬度（可选，100%准确）</label>
+          <input value={manualCoords} onChange={e=>setManualCoords(e.target.value)} placeholder="如：104.0668,30.5728（从高德地图长按复制）" className="w-full border border-blue-200 rounded-lg p-2 text-xs outline-none focus:ring-2 focus:ring-blue-300 bg-white"/>
+          <p className="text-[10px] text-blue-500 mt-1">💡 如果自动解析失败，打开高德地图App → 长按位置 → 复制经纬度 → 粘贴到这里</p>
+        </div>
+        <button onClick={findMyNearbyCustomers} disabled={nearbyLoading} className="w-full bg-blue-500 text-white py-2 rounded-lg text-sm font-bold card-press flex items-center justify-center gap-1 shadow-md shadow-blue-200">
+          {nearbyLoading?'正在扫描附近客户...':'🔍 扫描我库里的附近客户'}
+        </button>
+        {geoError&&<div className="mt-2 text-xs text-red-600 bg-red-50 p-2 rounded whitespace-pre-line border border-red-100">{geoError}</div>}
+        {showNearby&&!geoError&&<div className="mt-3 space-y-2">
+          {!nearbyLoading&&nearbyList.length===0&&<div className="text-center text-xs text-blue-400 py-2">5公里内暂无您库里的其他客户</div>}
+          {nearbyList.map(c=><div key={c.id} className="bg-white rounded-lg p-2.5 shadow-sm border border-blue-50 flex items-center justify-between">
+            <div className="min-w-0 flex-1"><div className="font-bold text-sm text-gray-800 truncate">{c.company||c.name}</div><div className="text-[10px] text-gray-400 truncate">{c.address}</div></div>
+            <div className="shrink-0 ml-2 text-right"><div className="text-blue-600 font-bold text-sm">{c.distance} km</div><Badge text={c.status||'未标记'} color={statusColors[c.status]||statusColors['未标记']}/></div>
+          </div>)}
+        </div>}
+      </div>
+    </div>}
+
+    {tab==='followUps'&&<div>
+      <button onClick={()=>onAddFollowUp(customer.id)} className="w-full bg-blue-500 text-white py-2.5 rounded-lg text-sm font-medium mb-4 card-press flex items-center justify-center gap-1 shadow-md shadow-blue-200"><Icon name="plus" size={16}/>新增跟进</button>
+      {sortedFu.length===0&&<div className="text-center text-gray-400 py-8">暂无跟进记录</div>}
+      <div className="relative">{sortedFu.map((fu,i)=><div key={fu.id} className="relative pl-8 pb-6">{i<sortedFu.length-1&&<div className="timeline-line"/>}<div className="absolute left-2 top-1 w-5 h-5 rounded-full bg-blue-100 border-2 border-blue-400 flex items-center justify-center"><span className="text-[10px]">{typeIcons[fu.type]||'📌'}</span></div><div className="bg-white rounded-lg p-3 shadow-sm border"><div className="flex items-center gap-2 text-xs text-gray-400 mb-1"><span>{fu.date}</span><span className="badge bg-blue-50 text-blue-600">{fu.type}</span>{fu.nextDate&&<span className={`ml-auto font-medium ${isOverdue(fu.nextDate)?'text-red-500':'text-blue-500'}`}>下次: {fu.nextDate}</span>}</div><p className="text-sm text-gray-700">{fu.content}</p></div></div>)}</div>
+    </div>}
+
+    {tab==='contacts'&&<div>
+      <button onClick={()=>setShowAddContact(true)} className="w-full bg-blue-500 text-white py-2.5 rounded-lg text-sm font-medium mb-4 card-press flex items-center justify-center gap-1 shadow-md shadow-blue-200"><Icon name="userPlus" size={16}/>添加联系人</button>
+      {contacts.length===0&&<div className="text-center text-gray-400 py-8"><p className="text-4xl mb-2">👥</p><p>暂无联系人，点击上方添加</p></div>}
+      {contacts.map(ct=><div key={ct.id} className="bg-white rounded-xl p-4 shadow-sm border mb-3">
+        <div className="flex items-start justify-between mb-2">
+          <div className="flex items-center gap-2 flex-1 min-w-0" onClick={()=>setEditingContact(ct)}>
+            <div className="w-9 h-9 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-sm shrink-0">{(ct.name||'?')[0]}</div>
+            <div className="min-w-0"><div className="font-bold text-gray-800 text-sm">{ct.name||'未命名'}</div>{ct.role&&<div className="text-xs text-gray-400">{ct.role}</div>}</div>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <button onClick={()=>setEditingContact(ct)} className="p-1.5 text-blue-500 hover:bg-blue-50 rounded-lg card-press"><Icon name="edit" size={16}/></button>
+            <button onClick={()=>removeContact(ct.id)} className="p-1.5 text-red-400 hover:bg-red-50 rounded-lg card-press"><Icon name="trash" size={16}/></button>
+          </div>
+        </div>
+        {ct.phone&&<a href={`tel:${ct.phone}`} className="flex items-center gap-2 text-sm text-blue-600 bg-blue-50 px-3 py-2 rounded-lg mb-2 card-press"><Icon name="phone" size={14}/>{ct.phone}</a>}
+        {ct.note&&<div className="text-xs text-gray-500 mt-1 italic">"{ct.note}"</div>}
+      </div>)}
+      <AddContactModal show={showAddContact} onClose={()=>setShowAddContact(false)} onSave={addContact}/>
+      <EditContactModal show={!!editingContact} onClose={()=>setEditingContact(null)} contact={editingContact} onSave={updateContact}/>
+    </div>}
+
+    <EditBasicInfoModal show={showEditBasic} onClose={()=>setShowEditBasic(false)} customer={customer} onSave={onUpdate}/>
+  </div>;
+};
+
+/* ==================== App ==================== */
+const App=()=>{
+  const[customers,setCustomers]=useState([]);const[page,setPage]=useState('dashboard');const[detailId,setDetailId]=useState(null);
+  const[showAddCustomer,setShowAddCustomer]=useState(false);const[showAddFollowUp,setShowAddFollowUp]=useState(false);
+  const[followUpCustomerId,setFollowUpCustomerId]=useState(null);const[followUpTitle,setFollowUpTitle]=useState('添加跟进记录');
+  const[selectionMode,setSelectionMode]=useState(false);const[selectedIds,setSelectedIds]=useState([]);
+  const[filterTag,setFilterTag]=useState(null);const[loading,setLoading]=useState(true);const fileInputRef=useRef(null);
+
+  useEffect(()=>{Cloud.loadAll().then(d=>{setCustomers(d);setLoading(false)}).catch(e=>{console.error(e);setLoading(false)});const ch=Cloud.subscribe(()=>Cloud.loadAll().then(d=>setCustomers(d)));return()=>Cloud.unsubscribe(ch)},[]);
+
+  const addCustomer=c=>{const next=[...customers,c];setCustomers(next);Cloud.save(c)};
+  const updateCustomer=c=>{setCustomers(prev=>prev.map(x=>x.id===c.id?c:x));Cloud.save(c)};
+  const deleteCustomer=id=>{setCustomers(prev=>prev.filter(x=>x.id!==id));Cloud.remove(id);setPage('list');setDetailId(null)};
+  const addFollowUp=(cid,fu)=>{const next=customers.map(c=>c.id===cid?{...c,followUps:[...(c.followUps||[]),fu]}:c);setCustomers(next);Cloud.save(next.find(x=>x.id===cid))};
+  const batchLevel=(ids,lv)=>{const next=customers.map(c=>ids.includes(c.id)?{...c,level:lv}:c);setCustomers(next);Cloud.bulkSave(next.filter(c=>ids.includes(c.id)));setSelectedIds([]);setSelectionMode(false)};
+  const batchStatus=(ids,st)=>{const next=customers.map(c=>ids.includes(c.id)?{...c,status:st}:c);setCustomers(next);Cloud.bulkSave(next.filter(c=>ids.includes(c.id)));setSelectedIds([]);setSelectionMode(false)};
+  const batchDelete=ids=>{if(!confirm(`删除${ids.length}位客户？`))return;setCustomers(prev=>prev.filter(c=>!ids.includes(c.id)));ids.forEach(id=>Cloud.remove(id));setSelectedIds([]);setSelectionMode(false)};
+  const handleBackup=()=>{const b=new Blob([JSON.stringify(customers,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=`FA备份_${todayStr()}.json`;a.click()};
+  const handleImportFile=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{try{const d=JSON.parse(ev.target.result);if(!Array.isArray(d)){alert('格式错误');return}if(!confirm(`导入${d.length}条？将覆盖现有数据`))return;setCustomers(d);Cloud.importAll(d);alert('导入成功')}catch(err){alert('解析失败:'+err.message)}};r.readAsText(f);e.target.value=''};
+  const handleAddCustomerClose=()=>{setShowAddCustomer(false)};
+  const detailCustomer=customers.find(c=>c.id===detailId)||null;
+
+  if(loading)return <div className="app-container flex items-center justify-center min-h-screen"><div className="text-center"><div className="text-4xl mb-3 animate-bounce">⚡</div><p className="text-gray-400">加载中...</p></div></div>;
+
+  return <div className="app-container shadow-2xl">
+    <input type="file" ref={fileInputRef} accept=".json" style={{display:'none'}} onChange={handleImportFile}/>
+    {page==='dashboard'&&<Dashboard customers={customers} onGoList={tag=>{setFilterTag(tag||null);setPage('list')}} onAddCustomer={()=>setShowAddCustomer(true)} onBackup={handleBackup} onImport={()=>fileInputRef.current?.click()}/>}
+    {page==='list'&&<CustomerList customers={customers} onDetail={id=>{setDetailId(id);setPage('detail')}} onAddCustomer={()=>setShowAddCustomer(true)} selectionMode={selectionMode} setSelectionMode={setSelectionMode} selectedIds={selectedIds} setSelectedIds={setSelectedIds} onBatchLevel={batchLevel} onBatchStatus={batchStatus} onBatchDelete={batchDelete} filterTag={filterTag} setFilterTag={setFilterTag}/>}
+    {page==='detail'&&detailCustomer&&<CustomerDetail customer={detailCustomer} allCustomers={customers} onBack={()=>setPage('list')} onDelete={deleteCustomer} onAddFollowUp={cid=>{setFollowUpCustomerId(cid);setFollowUpTitle('添加跟进记录');setShowAddFollowUp(true)}} onUpdate={updateCustomer}/>}
+    {/* 🌟 传入 allCustomers 用于查重 */}
+    <AddCustomerModal show={showAddCustomer} onClose={handleAddCustomerClose} onSave={addCustomer} allCustomers={customers}/>
+    <AddFollowUpModal show={showAddFollowUp} onClose={()=>setShowAddFollowUp(false)} onSave={addFollowUp} customerId={followUpCustomerId} title={followUpTitle}/>
+    <div className="bottom-nav">
+      <div className={`nav-item ${page==='dashboard'||page==='detail'?'active':''}`} onClick={()=>setPage('dashboard')}><Icon name="home" size={22}/><span>首页</span></div>
+      <div className={`nav-item ${page==='list'?'active':''}`} onClick={()=>setPage('list')}><Icon name="users" size={22}/><span>客户库</span></div>
+      <div className="nav-item" onClick={()=>setShowAddCustomer(true)}><div className="bg-blue-500 text-white rounded-full p-2 -mt-4 shadow-lg shadow-blue-300"><Icon name="plus" size={24}/></div><span className="text-blue-500">新增</span></div>
+    </div>
+  </div>;
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
